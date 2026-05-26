@@ -64,7 +64,7 @@ def backup_volumes(container_name: str, tag: str) -> list[str]:
         try:
             client.containers.run(
                 "alpine",
-                command=f"tar czf /backup/{archive_name} -C /source .",
+                command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
                 volumes={
                     volume_name: {"bind": "/source", "mode": "ro"},
                     str(backup_dir): {"bind": "/backup", "mode": "rw"},
