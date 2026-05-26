@@ -1,0 +1,108 @@
+# ─────────────────────────────────────────────
+# Updatarr — .gitignore
+# ─────────────────────────────────────────────
+
+# Local compose file — contains environment-specific paths and settings.
+# Copy docker-compose.yml.example and fill in your values.
+docker-compose.yml
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# ─────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+pip-log.txt
+pip-delete-this-directory.txt
+.venv/
+venv/
+ENV/
+env/
+
+# ─────────────────────────────────────────────
+# Database
+# ─────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─────────────────────────────────────────────
+# Docker
+# ─────────────────────────────────────────────
+.dockerignore
+
+# ─────────────────────────────────────────────
+# OS
+# ─────────────────────────────────────────────
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+
+# ─────────────────────────────────────────────
+# Editors
+# ─────────────────────────────────────────────
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# JetBrains
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim
+*.swp
+*.swo
+Session.vim
+
+# ─────────────────────────────────────────────
+# Logs
+# ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─────────────────────────────────────────────
+# Backups (never commit backup archives)
+# ─────────────────────────────────────────────
+backups/
+*.tar.gz
+*.tar.bz2
+*.zip
