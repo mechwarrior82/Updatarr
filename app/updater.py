@@ -12,6 +12,7 @@ from docker_ops import (
     wait_for_health,
 )
 from db import ContainerConfig, UpdateEvent, BackupRecord
+from version_check import record_current_version
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ def run_update(container_name: str, db: Session) -> dict:
     healthy = wait_for_health(container_name, timeout=timeout)
 
     if healthy:
+        record_current_version(container_name, db)
         return _success(f"Updated successfully. New image: {new_image_id[:12] if new_image_id else 'unknown'}")
 
     # ── 6. Rollback ───────────────────────────────────────────────

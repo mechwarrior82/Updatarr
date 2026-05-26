@@ -764,13 +764,58 @@ async function renderDetail() {
         <span class="detail-value" style="font-size:10px">${c.image_id ? c.image_id.substring(7,19) : '—'}</span>
       </div>
       <div class="detail-row">
-        <span class="detail-label">Update</span>
-        <span class="detail-value" id="update-check-result">
-          <button class="btn" style="padding:3px 10px;font-size:10px" onclick="checkUpdate('${c.name}','${c.image}')">
-            Check
-          </button>
+        <span class="detail-label">Ver. source</span>
+        <span class="detail-value" style="color:var(--text-dim);font-size:10px">
+          ${c.version_source === 'dockerhub' ? '🐳 Docker Hub' :
+            c.version_source === 'github_releases' ? '⬡ GitHub releases' :
+            c.version_source === 'github_tags' ? '⬡ GitHub tags' :
+            c.version_source === 'unsupported' ? '— unsupported' : '—'}
         </span>
       </div>
+      <div class="detail-row" style="align-items:flex-start">
+        <span class="detail-label" style="padding-top:4px">GitHub repo</span>
+        <span class="detail-value" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          <span style="display:flex;gap:4px;align-items:center">
+            <input id="repo-input" type="text"
+              value="${c.github_repo || ''}"
+              placeholder="${c.github_suggestion || 'owner/repo'}"
+              style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:2px;width:140px"
+              onkeydown="if(event.key==='Enter') saveRepo('${c.name}')">
+            <button class="icon-btn" title="Save and use GitHub" onclick="saveRepo('${c.name}')">✓</button>
+            ${c.github_repo ? `<button class="icon-btn danger" title="Clear GitHub repo (revert to Docker Hub)" onclick="clearRepo('${c.name}')">✕</button>` : ''}
+          </span>
+          ${!c.github_repo && c.github_suggestion
+            ? `<span style="color:var(--text-dim);font-size:9px">suggestion: ${c.github_suggestion}</span>`
+            : ''}
+          ${c.github_repo
+            ? `<span style="color:var(--accent2);font-size:9px">using GitHub ↑</span>`
+            : `<span style="color:var(--text-dim);font-size:9px">optional — overrides Docker Hub</span>`}
+        </span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Current ver.</span>
+        <span class="detail-value" style="color:var(--accent2);font-size:11px">${c.current_version || '—'}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Latest ver.</span>
+        <span class="detail-value" id="version-check-result">
+          ${c.latest_version
+            ? `<span style="font-size:11px;color:${c.update_available ? 'var(--warn)' : 'var(--accent)'}">${c.latest_version}</span>
+               <button class="btn" style="padding:2px 7px;font-size:9px;margin-left:4px" onclick="checkVersion('${c.name}')">↻</button>`
+            : `<button class="btn" style="padding:3px 10px;font-size:10px" onclick="checkVersion('${c.name}')">Check</button>`
+          }
+        </span>
+      </div>
+
+      ${c.update_available ? `
+      <div class="detail-row">
+        <span class="detail-label">Status</span>
+        <span class="detail-value"><span class="badge held"><span class="dot"></span>UPDATE AVAILABLE</span></span>
+      </div>` : (c.latest_version && !c.update_available ? `
+      <div class="detail-row">
+        <span class="detail-label">Status</span>
+        <span class="detail-value"><span class="badge running"><span class="dot"></span>UP TO DATE</span></span>
+      </div>` : '')}
     </div>
 
     <div class="detail-card">
@@ -793,25 +838,91 @@ async function renderDetail() {
 }
 
 // ─────────────────────────────────────────────
-// Update check
+// Version check
 // ─────────────────────────────────────────────
-async function checkUpdate(name, image) {
-  const el = document.getElementById('update-check-result');
+async function checkVersion(name) {
+  const el = document.getElementById('version-check-result');
   if (el) el.innerHTML = '<span class="spinner"></span>';
   try {
-    const r = await api('GET', `/api/check-update/${name}`);
-    if (!el) return;
-    if (r.error) {
-      el.innerHTML = `<span style="color:var(--text-dim);font-size:10px">⚠ ${r.error}</span>`;
-    } else if (r.up_to_date === true) {
-      el.innerHTML = `<span class="badge running"><span class="dot"></span>UP TO DATE</span>`;
-    } else if (r.up_to_date === false) {
-      el.innerHTML = `<span class="badge held"><span class="dot"></span>UPDATE AVAILABLE</span>`;
-    } else {
-      el.innerHTML = `<span style="color:var(--text-dim);font-size:10px">Unknown</span>`;
+    const r = await api('GET', `/api/check-version/${name}`);
+    if (r.status === 'unsupported') {
+      if (el) el.innerHTML = `<span style="color:var(--text-dim);font-size:10px">Not supported</span>`;
+      return;
+    }
+    if (r.status === 'error') {
+      if (el) el.innerHTML = `<span style="color:var(--danger);font-size:10px">⚠ ${r.detail}</span>`;
+      return;
+    }
+    // Update the local container cache so the detail panel re-renders correctly
+    const c = containers.find(c => c.name === name);
+    if (c) {
+      c.latest_version = r.latest_version;
+      c.current_version = r.current_version;
+      c.update_available = r.update_available;
+      c.version_source = r.source || null;
+      c.github_suggestion = r.github_suggestion || null;
+    }
+    if (selectedContainer?.name === name) {
+      selectedContainer = c;
+      await renderDetail();
     }
   } catch(e) {
     if (el) el.innerHTML = `<span style="color:var(--danger);font-size:10px">Failed</span>`;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Repo save
+// ─────────────────────────────────────────────
+async function clearRepo(name) {
+  try {
+    await api('POST', `/api/containers/${name}/config`, {
+      github_repo: '',
+      github_endpoint: null
+    });
+    const c = containers.find(c => c.name === name);
+    if (c) {
+      c.github_repo = null;
+      c.github_endpoint = null;
+      c.latest_version = null;
+      c.update_available = null;
+      c.version_source = null;
+    }
+    toast(`GitHub repo cleared for ${name} — will use Docker Hub`);
+    if (selectedContainer?.name === name) {
+      selectedContainer = c;
+      await renderDetail();
+    }
+  } catch(e) {
+    toast('Failed to clear repo: ' + e.message, 'error');
+  }
+}
+
+async function saveRepo(name) {
+  const input = document.getElementById('repo-input');
+  if (!input) return;
+  const repo = input.value.trim();
+  if (!repo) return;
+  try {
+    await api('POST', `/api/containers/${name}/config`, {
+      github_repo: repo,
+      github_endpoint: null  // reset endpoint so it re-probes
+    });
+    const c = containers.find(c => c.name === name);
+    if (c) {
+      c.github_repo = repo;
+      c.github_endpoint = null;
+      c.latest_version = null;
+      c.update_available = null;
+      c.version_source = null;
+    }
+    toast(`Repo saved for ${name} — click Check to fetch version`);
+    if (selectedContainer?.name === name) {
+      selectedContainer = c;
+      await renderDetail();
+    }
+  } catch(e) {
+    toast('Failed to save repo: ' + e.message, 'error');
   }
 }
 

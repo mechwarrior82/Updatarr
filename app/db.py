@@ -15,10 +15,20 @@ class ContainerConfig(Base):
 
     name = Column(String, primary_key=True)
     monitored = Column(Boolean, default=False)
-    held = Column(Boolean, default=False)        # Update hold — set on rollback
+    held = Column(Boolean, default=False)
     hold_reason = Column(Text, nullable=True)
-    health_timeout = Column(Integer, default=90) # Seconds to wait for healthy
+    health_timeout = Column(Integer, default=90)
     notes = Column(Text, nullable=True)
+
+    # Version tracking
+    github_repo = Column(String, nullable=True)       # user-set GitHub repo e.g. "linuxserver/docker-sonarr"
+    dockerhub_repo = Column(String, nullable=True)    # auto-detected Docker Hub slug e.g. "linuxserver/sonarr"
+    github_endpoint = Column(String, nullable=True)   # active source: github_releases|github_tags|dockerhub|unsupported
+    current_version = Column(String, nullable=True)   # version recorded at last update
+    latest_version = Column(String, nullable=True)    # latest seen from source
+    version_checked_at = Column(DateTime, nullable=True)
+    update_available = Column(Boolean, nullable=True)
+
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -31,7 +41,7 @@ class UpdateEvent(Base):
     old_image_id = Column(String, nullable=True)
     new_image_id = Column(String, nullable=True)
     backup_tag = Column(String, nullable=True)
-    status = Column(String, nullable=False)       # pending|success|failed|rolled_back
+    status = Column(String, nullable=False)
     detail = Column(Text, nullable=True)
     started_at = Column(DateTime, default=datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
@@ -44,7 +54,7 @@ class BackupRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     container_name = Column(String, nullable=False)
     tag = Column(String, nullable=False)
-    trigger = Column(String, default="manual")    # manual|pre_update|scheduled
+    trigger = Column(String, default="manual")
     files = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

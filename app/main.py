@@ -11,7 +11,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db import init_db, get_db, ContainerConfig, UpdateEvent, BackupRecord
-from docker_ops import list_all_containers, list_backups, check_for_update
+from docker_ops import list_all_containers, list_backups
+from version_check import check_version, check_all_versions
 from updater import (
     run_update,
     run_all_updates,
@@ -44,6 +45,19 @@ def scheduled_update_job():
         db.close()
 
 
+def scheduled_version_check_job():
+    from db import SessionLocal
+    from version_check import check_all_versions
+    db = SessionLocal()
+    try:
+        logger.info("Scheduled version check starting")
+        results = check_all_versions(db)
+        updates = [r for r in results if r.get("update_available")]
+        logger.info(f"Version check complete: {len(updates)} update(s) available")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -56,6 +70,14 @@ async def lifespan(app: FastAPI):
             minute=parts[0], hour=parts[1],
             day=parts[2], month=parts[3], day_of_week=parts[4],
             id="scheduled_update",
+        )
+        # Version check runs 30 minutes before the update window
+        check_hour = str((int(parts[1]) - 1) % 24)
+        scheduler.add_job(
+            scheduled_version_check_job,
+            "cron",
+            minute="30", hour=check_hour,
+            id="scheduled_version_check",
         )
     scheduler.start()
     logger.info(f"Scheduler started. Update schedule: {UPDATE_SCHEDULE}")
@@ -92,6 +114,14 @@ def get_containers(db: Session = Depends(get_db)):
             "hold_reason": cfg.hold_reason if cfg else None,
             "health_timeout": cfg.health_timeout if cfg else 90,
             "notes": cfg.notes if cfg else None,
+            "github_repo": cfg.github_repo if cfg else None,
+            "current_version": cfg.current_version if cfg else None,
+            "latest_version": cfg.latest_version if cfg else None,
+            "update_available": cfg.update_available if cfg else None,
+            "version_checked_at": cfg.version_checked_at.isoformat() if cfg and cfg.version_checked_at else None,
+            "version_source": cfg.github_endpoint if cfg else None,
+            "dockerhub_repo": cfg.dockerhub_repo if cfg else None,
+            "github_suggestion": None,  # populated by check_version, not stored
         })
     return result
 
@@ -106,6 +136,8 @@ class ContainerConfigUpdate(BaseModel):
     hold_reason: str | None = None
     health_timeout: int | None = None
     notes: str | None = None
+    github_repo: str | None = None
+    github_endpoint: str | None = None
 
 
 @app.post("/api/containers/{name}/config")
@@ -125,6 +157,15 @@ def update_container_config(name: str, body: ContainerConfigUpdate, db: Session 
         cfg.health_timeout = body.health_timeout
     if body.notes is not None:
         cfg.notes = body.notes
+    if body.github_repo is not None:
+        # Empty string = clear the repo (revert to Docker Hub)
+        cfg.github_repo = body.github_repo if body.github_repo else None
+        # Reset endpoint so next check re-probes with new source
+        cfg.github_endpoint = None
+        cfg.latest_version = None
+        cfg.update_available = None
+    if body.github_endpoint is not None:
+        cfg.github_endpoint = body.github_endpoint
 
     cfg.updated_at = datetime.utcnow()
     db.commit()
@@ -201,17 +242,26 @@ def api_events(limit: int = 50, db: Session = Depends(get_db)):
     ]
 
 
-@app.get("/api/check-update/{name}")
-def api_check_update(name: str):
-    """Check if a container image has an update available on the registry."""
+@app.get("/api/check-version/{name}")
+def api_check_version(name: str, db: Session = Depends(get_db)):
+    """Check GitHub for the latest version of a container."""
+    # Pass image tag so auto-suggestion works on first check
+    import docker as docker_sdk
+    image_tag = None
     try:
-        container = list_all_containers()
-        match = next((c for c in container if c["name"] == name), None)
-        if not match:
-            return {"error": "Container not found"}
-        return check_for_update(match["image"])
-    except Exception as e:
-        return {"up_to_date": None, "error": str(e)}
+        client = docker_sdk.from_env()
+        c = client.containers.get(name)
+        image_tag = c.image.tags[0] if c.image.tags else None
+    except Exception:
+        pass
+    return check_version(name, db, image_tag=image_tag)
+
+
+@app.post("/api/check-versions-all")
+def api_check_versions_all(db: Session = Depends(get_db)):
+    """Check GitHub versions for all monitored containers."""
+    return check_all_versions(db)
+
 
 
 @app.get("/api/schedule")
