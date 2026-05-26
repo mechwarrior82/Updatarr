@@ -60,10 +60,10 @@ def backup_volumes(container_name: str, tag: str) -> list[str]:
 
         logger.info(f"Backing up volume {volume_name} -> {archive_path}")
 
-        # Spin up a temporary alpine container to tar the volume
+        # Spin up a temporary container to tar the volume (debian:bookworm-slim for GNU tar --ignore-failed-read support)
         try:
             client.containers.run(
-                "alpine",
+                "debian:bookworm-slim",
                 command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
                 volumes={
                     volume_name: {"bind": "/source", "mode": "ro"},
@@ -106,7 +106,7 @@ def restore_volumes(container_name: str, tag: str) -> bool:
                 client.volumes.create(name=volume_name)
 
             client.containers.run(
-                "alpine",
+                "debian:bookworm-slim",
                 command=f"sh -c 'rm -rf /target/* && tar xzf /backup/{archive_path.name} -C /target'",
                 volumes={
                     volume_name: {"bind": "/target", "mode": "rw"},
