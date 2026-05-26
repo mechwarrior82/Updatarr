@@ -763,6 +763,14 @@ async function renderDetail() {
         <span class="detail-label">Image ID</span>
         <span class="detail-value" style="font-size:10px">${c.image_id ? c.image_id.substring(7,19) : '—'}</span>
       </div>
+      <div class="detail-row">
+        <span class="detail-label">Update</span>
+        <span class="detail-value" id="update-check-result">
+          <button class="btn" style="padding:3px 10px;font-size:10px" onclick="checkUpdate('${c.name}','${c.image}')">
+            Check
+          </button>
+        </span>
+      </div>
     </div>
 
     <div class="detail-card">
@@ -782,6 +790,29 @@ async function renderDetail() {
       ${backupList}
     </div>
   `;
+}
+
+// ─────────────────────────────────────────────
+// Update check
+// ─────────────────────────────────────────────
+async function checkUpdate(name, image) {
+  const el = document.getElementById('update-check-result');
+  if (el) el.innerHTML = '<span class="spinner"></span>';
+  try {
+    const r = await api('GET', `/api/check-update/${name}`);
+    if (!el) return;
+    if (r.error) {
+      el.innerHTML = `<span style="color:var(--text-dim);font-size:10px">⚠ ${r.error}</span>`;
+    } else if (r.up_to_date === true) {
+      el.innerHTML = `<span class="badge running"><span class="dot"></span>UP TO DATE</span>`;
+    } else if (r.up_to_date === false) {
+      el.innerHTML = `<span class="badge held"><span class="dot"></span>UPDATE AVAILABLE</span>`;
+    } else {
+      el.innerHTML = `<span style="color:var(--text-dim);font-size:10px">Unknown</span>`;
+    }
+  } catch(e) {
+    if (el) el.innerHTML = `<span style="color:var(--danger);font-size:10px">Failed</span>`;
+  }
 }
 
 // ─────────────────────────────────────────────

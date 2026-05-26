@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db import init_db, get_db, ContainerConfig, UpdateEvent, BackupRecord
-from docker_ops import list_all_containers, list_backups
+from docker_ops import list_all_containers, list_backups, check_for_update
 from updater import (
     run_update,
     run_all_updates,
@@ -199,6 +199,19 @@ def api_events(limit: int = 50, db: Session = Depends(get_db)):
         }
         for e in events
     ]
+
+
+@app.get("/api/check-update/{name}")
+def api_check_update(name: str):
+    """Check if a container image has an update available on the registry."""
+    try:
+        container = list_all_containers()
+        match = next((c for c in container if c["name"] == name), None)
+        if not match:
+            return {"error": "Container not found"}
+        return check_for_update(match["image"])
+    except Exception as e:
+        return {"up_to_date": None, "error": str(e)}
 
 
 @app.get("/api/schedule")

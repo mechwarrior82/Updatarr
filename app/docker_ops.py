@@ -141,17 +141,20 @@ def restore_volumes(container_name: str, tag: str) -> bool:
 
 def list_backups(container_name: str) -> list[dict]:
     """Return a list of backup tags available for a container."""
+    import re
     backup_dir = Path(BACKUP_ROOT) / container_name
     if not backup_dir.exists():
         return []
 
+    # Tag format is always YYYYMMDD_HHMMSS — match it directly
+    tag_pattern = re.compile(r'(\d{8}_\d{6})\.tar\.gz$')
+
     tags: dict[str, dict] = {}
     for f in backup_dir.glob("*.tar.gz"):
-        # filename: volumename_tag.tar.gz
-        parts = f.name.rsplit("_", 1)
-        if len(parts) != 2:
+        m = tag_pattern.search(f.name)
+        if not m:
             continue
-        tag = parts[1].replace(".tar.gz", "")
+        tag = m.group(1)
         if tag not in tags:
             tags[tag] = {
                 "tag": tag,
@@ -306,3 +309,63 @@ def list_all_containers() -> list[dict]:
             "started": c.attrs["State"].get("StartedAt"),
         })
     return result
+
+# ─────────────────────────────────────────────
+# Update check
+# ─────────────────────────────────────────────
+
+def check_for_update(image_tag: str) -> dict:
+    """
+    Compare the local image digest against the remote registry digest.
+    Returns {"up_to_date": bool, "local_digest": str, "remote_digest": str}
+    Works for Docker Hub images (most *arr images). May not work for ghcr.io
+    images that require auth.
+    """
+    import subprocess
+    try:
+        # Pull the manifest digest without downloading the full image
+        result = subprocess.run(
+            ["docker", "manifest", "inspect", "--verbose", image_tag],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return {"up_to_date": None, "error": "Could not reach registry"}
+
+        import json
+        data = json.loads(result.stdout)
+
+        # Handle both single manifest and manifest list responses
+        if isinstance(data, list):
+            # Manifest list — find the amd64/linux entry
+            remote_digest = None
+            for entry in data:
+                platform = entry.get("Descriptor", {}).get("platform", {})
+                if platform.get("architecture") == "amd64" and platform.get("os") == "linux":
+                    remote_digest = entry.get("Descriptor", {}).get("digest")
+                    break
+        else:
+            remote_digest = data.get("Descriptor", {}).get("digest")
+
+        if not remote_digest:
+            return {"up_to_date": None, "error": "Could not parse remote digest"}
+
+        # Get local image digest
+        try:
+            local_image = client.images.get(image_tag)
+            local_digest = local_image.attrs.get("RepoDigests", [None])[0]
+            if local_digest:
+                # RepoDigests format: "image@sha256:abc123"
+                local_digest = local_digest.split("@")[-1]
+        except docker.errors.ImageNotFound:
+            return {"up_to_date": None, "error": "Image not found locally"}
+
+        up_to_date = local_digest == remote_digest
+        return {
+            "up_to_date": up_to_date,
+            "local_digest": local_digest[:19] if local_digest else None,
+            "remote_digest": remote_digest[:19] if remote_digest else None,
+        }
+
+    except Exception as e:
+        logger.error(f"Update check failed for {image_tag}: {e}")
+        return {"up_to_date": None, "error": str(e)}
