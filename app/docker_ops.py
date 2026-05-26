@@ -12,6 +12,47 @@ logger = logging.getLogger(__name__)
 BACKUP_ROOT = os.environ.get("BACKUP_ROOT", "/backups")
 
 
+def _resolve_host_path(container_path: str) -> str:
+    """
+    Translate a path inside the Updatarr container to the real path on the
+    Docker host. Required because when we spin up a temporary debian container
+    to tar a volume, Docker resolves bind-mount paths from the HOST — it has
+    no knowledge of paths inside the Updatarr container.
+
+    Looks at Updatarr's own mounts and finds the bind mount whose destination
+    is a prefix of container_path, then remaps to the host source.
+    """
+    try:
+        self_name = os.environ.get("HOSTNAME", "updatarr")
+        self_container = client.containers.get(self_name)
+        mounts = self_container.attrs.get("Mounts", [])
+        container_path = str(container_path)
+
+        # Find the deepest matching bind mount
+        best_match = None
+        best_len = 0
+        for m in mounts:
+            if m.get("Type") != "bind":
+                continue
+            dest = m["Destination"].rstrip("/")
+            if container_path.startswith(dest) and len(dest) > best_len:
+                best_match = m
+                best_len = len(dest)
+
+        if best_match:
+            dest = best_match["Destination"].rstrip("/")
+            source = best_match["Source"].rstrip("/")
+            host_path = source + container_path[len(dest):]
+            logger.debug(f"Resolved {container_path} -> {host_path}")
+            return host_path
+
+    except Exception as e:
+        logger.warning(f"Could not resolve host path for {container_path}: {e}")
+
+    # Fallback: return as-is (works if running with host network or direct bind)
+    return str(container_path)
+
+
 # ─────────────────────────────────────────────
 # Image helpers
 # ─────────────────────────────────────────────
@@ -73,6 +114,11 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
 
         logger.info(f"Backing up volume {volume_name} -> {archive_path}")
 
+        # Resolve the real host path — Docker mounts are resolved from the host,
+        # not from inside the Updatarr container.
+        host_backup_dir = _resolve_host_path(backup_dir)
+        logger.debug(f"Host backup dir: {host_backup_dir}")
+
         # debian:bookworm-slim for GNU tar (alpine BusyBox tar lacks --ignore-failed-read)
         try:
             client.containers.run(
@@ -80,7 +126,7 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
                 command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
                 volumes={
                     volume_name: {"bind": "/source", "mode": "ro"},
-                    str(backup_dir): {"bind": "/backup", "mode": "rw"},
+                    host_backup_dir: {"bind": "/backup", "mode": "rw"},
                 },
                 remove=True,
             )
@@ -122,12 +168,13 @@ def restore_volumes(container_name: str, tag: str) -> bool:
             except docker.errors.NotFound:
                 client.volumes.create(name=volume_name)
 
+            host_backup_dir = _resolve_host_path(backup_dir)
             client.containers.run(
                 "debian:bookworm-slim",
                 command=f"sh -c 'rm -rf /target/* && tar xzf /backup/{archive_path.name} -C /target'",
                 volumes={
                     volume_name: {"bind": "/target", "mode": "rw"},
-                    str(backup_dir): {"bind": "/backup", "mode": "ro"},
+                    host_backup_dir: {"bind": "/backup", "mode": "ro"},
                 },
                 remove=True,
             )
@@ -317,13 +364,12 @@ def list_all_containers() -> list[dict]:
 def check_for_update(image_tag: str) -> dict:
     """
     Compare the local image digest against the remote registry digest.
-    Returns {"up_to_date": bool, "local_digest": str, "remote_digest": str}
-    Works for Docker Hub images (most *arr images). May not work for ghcr.io
-    images that require auth.
+    Uses the manifest Ref digest which matches what Docker stores in
+    RepoDigests after a pull — works correctly for lscr.io, ghcr.io,
+    and Docker Hub.
     """
-    import subprocess
+    import subprocess, json
     try:
-        # Pull the manifest digest without downloading the full image
         result = subprocess.run(
             ["docker", "manifest", "inspect", "--verbose", image_tag],
             capture_output=True, text=True, timeout=30
@@ -331,33 +377,44 @@ def check_for_update(image_tag: str) -> dict:
         if result.returncode != 0:
             return {"up_to_date": None, "error": "Could not reach registry"}
 
-        import json
         data = json.loads(result.stdout)
 
-        # Handle both single manifest and manifest list responses
+        # The Ref field is "image@digest" — this digest matches RepoDigests locally.
+        remote_digest = None
         if isinstance(data, list):
-            # Manifest list — find the amd64/linux entry
-            remote_digest = None
             for entry in data:
                 platform = entry.get("Descriptor", {}).get("platform", {})
                 if platform.get("architecture") == "amd64" and platform.get("os") == "linux":
-                    remote_digest = entry.get("Descriptor", {}).get("digest")
+                    ref = entry.get("Ref", "")
+                    if "@" in ref:
+                        remote_digest = ref.split("@")[-1]
                     break
+            if not remote_digest and data:
+                ref = data[0].get("Ref", "")
+                if "@" in ref:
+                    remote_digest = ref.split("@")[-1]
         else:
-            remote_digest = data.get("Descriptor", {}).get("digest")
+            ref = data.get("Ref", "")
+            if "@" in ref:
+                remote_digest = ref.split("@")[-1]
 
         if not remote_digest:
             return {"up_to_date": None, "error": "Could not parse remote digest"}
 
-        # Get local image digest
+        # Get local RepoDigest set by Docker after a pull
         try:
             local_image = client.images.get(image_tag)
-            local_digest = local_image.attrs.get("RepoDigests", [None])[0]
-            if local_digest:
-                # RepoDigests format: "image@sha256:abc123"
-                local_digest = local_digest.split("@")[-1]
+            repo_digests = local_image.attrs.get("RepoDigests", [])
+            local_digest = None
+            for rd in repo_digests:
+                if "@" in rd:
+                    local_digest = rd.split("@")[-1]
+                    break
         except docker.errors.ImageNotFound:
             return {"up_to_date": None, "error": "Image not found locally"}
+
+        if not local_digest:
+            return {"up_to_date": None, "error": "No local digest available"}
 
         up_to_date = local_digest == remote_digest
         return {
