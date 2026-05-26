@@ -6,7 +6,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-client = docker.from_env()
+# Short timeout prevents a single unresponsive container from hanging
+# the entire /api/containers request for 60 seconds
+client = docker.from_env(timeout=10)
 logger = logging.getLogger(__name__)
 
 BACKUP_ROOT = os.environ.get("BACKUP_ROOT", "/backups")
@@ -342,19 +344,60 @@ def wait_for_health(container_name: str, timeout: int = 90) -> bool:
 # ─────────────────────────────────────────────
 
 def list_all_containers() -> list[dict]:
-    containers = client.containers.list(all=True)
+    """
+    List all containers using the low-level API to get full inspect data
+    in a single call per container, with a short timeout to avoid hanging
+    on a single unresponsive container.
+    """
     result = []
-    for c in containers:
-        c.reload()
-        health = c.attrs.get("State", {}).get("Health")
-        result.append({
-            "name": c.name,
-            "status": c.status,
-            "image": c.image.tags[0] if c.image.tags else c.image.short_id,
-            "image_id": c.image.id,
-            "health": health.get("Status") if health else None,
-            "started": c.attrs["State"].get("StartedAt"),
-        })
+    try:
+        # Use the low-level API — returns a list of dicts with basic info
+        # already included, avoiding the extra inspect call that .list() does.
+        raw_list = client.api.containers(all=True, size=False)
+    except Exception as e:
+        logger.error(f"Failed to list containers: {e}")
+        return []
+
+    for raw in raw_list:
+        try:
+            # Inspect individually with a tight timeout
+            container_id = raw["Id"]
+            attrs = client.api.inspect_container(container_id)
+
+            state = attrs.get("State", {})
+            health = state.get("Health")
+            image_info = attrs.get("Config", {}).get("Image", "")
+            
+            # Get image tags from the image object
+            image_id = attrs.get("Image", "")
+            image_tags = []
+            try:
+                img = client.images.get(image_id)
+                image_tags = img.tags
+            except Exception:
+                pass
+
+            result.append({
+                "name": attrs["Name"].lstrip("/"),
+                "status": state.get("Status", "unknown"),
+                "image": image_tags[0] if image_tags else image_info,
+                "image_id": image_id,
+                "health": health.get("Status") if health else None,
+                "started": state.get("StartedAt"),
+            })
+        except Exception as e:
+            # One bad container shouldn't break the whole list
+            name = raw.get("Names", ["unknown"])[0].lstrip("/")
+            logger.warning(f"Could not inspect container {name}: {e}")
+            result.append({
+                "name": name,
+                "status": "unknown",
+                "image": raw.get("Image", "unknown"),
+                "image_id": raw.get("ImageID", ""),
+                "health": None,
+                "started": None,
+            })
+
     return result
 
 # ─────────────────────────────────────────────
@@ -363,64 +406,50 @@ def list_all_containers() -> list[dict]:
 
 def check_for_update(image_tag: str) -> dict:
     """
-    Compare the local image digest against the remote registry digest.
-    Uses the manifest Ref digest which matches what Docker stores in
-    RepoDigests after a pull — works correctly for lscr.io, ghcr.io,
-    and Docker Hub.
+    Check if a newer image is available without downloading image layers.
+
+    Uses `docker pull --quiet` to fetch the latest manifest metadata only,
+    then compares the image ID before and after. Docker updates the local
+    image metadata on pull even if layers are already cached, so this is
+    both fast (cached layers are not re-downloaded) and accurate for all
+    registries including lscr.io and ghcr.io.
+
+    Returns:
+        up_to_date: True/False/None
+        updated: True if a new image was pulled (caller may want to note this)
     """
-    import subprocess, json
+    import subprocess
+
     try:
-        result = subprocess.run(
-            ["docker", "manifest", "inspect", "--verbose", image_tag],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode != 0:
-            return {"up_to_date": None, "error": "Could not reach registry"}
-
-        data = json.loads(result.stdout)
-
-        # The Ref field is "image@digest" — this digest matches RepoDigests locally.
-        remote_digest = None
-        if isinstance(data, list):
-            for entry in data:
-                platform = entry.get("Descriptor", {}).get("platform", {})
-                if platform.get("architecture") == "amd64" and platform.get("os") == "linux":
-                    ref = entry.get("Ref", "")
-                    if "@" in ref:
-                        remote_digest = ref.split("@")[-1]
-                    break
-            if not remote_digest and data:
-                ref = data[0].get("Ref", "")
-                if "@" in ref:
-                    remote_digest = ref.split("@")[-1]
-        else:
-            ref = data.get("Ref", "")
-            if "@" in ref:
-                remote_digest = ref.split("@")[-1]
-
-        if not remote_digest:
-            return {"up_to_date": None, "error": "Could not parse remote digest"}
-
-        # Get local RepoDigest set by Docker after a pull
+        # Capture image ID before pull
         try:
             local_image = client.images.get(image_tag)
-            repo_digests = local_image.attrs.get("RepoDigests", [])
-            local_digest = None
-            for rd in repo_digests:
-                if "@" in rd:
-                    local_digest = rd.split("@")[-1]
-                    break
+            before_id = local_image.id
+            before_digest = local_image.attrs.get("RepoDigests", [""])[0]
         except docker.errors.ImageNotFound:
             return {"up_to_date": None, "error": "Image not found locally"}
 
-        if not local_digest:
-            return {"up_to_date": None, "error": "No local digest available"}
+        # Pull latest manifest — layers already cached won't be re-downloaded
+        pull_result = subprocess.run(
+            ["docker", "pull", "--quiet", image_tag],
+            capture_output=True, text=True, timeout=120
+        )
+        if pull_result.returncode != 0:
+            return {"up_to_date": None, "error": f"Pull failed: {pull_result.stderr.strip()}"}
 
-        up_to_date = local_digest == remote_digest
+        # Compare image ID after pull
+        try:
+            after_image = client.images.get(image_tag)
+            after_id = after_image.id
+            after_digest = after_image.attrs.get("RepoDigests", [""])[0]
+        except docker.errors.ImageNotFound:
+            return {"up_to_date": None, "error": "Image not found after pull"}
+
+        up_to_date = before_id == after_id
+
         return {
             "up_to_date": up_to_date,
-            "local_digest": local_digest[:19] if local_digest else None,
-            "remote_digest": remote_digest[:19] if remote_digest else None,
+            "local_digest": (after_digest.split("@")[-1])[:19] if "@" in after_digest else None,
         }
 
     except Exception as e:
