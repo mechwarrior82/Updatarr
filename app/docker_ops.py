@@ -33,9 +33,16 @@ def pull_latest_image(image_name: str) -> docker.models.images.Image:
 # Volume backup / restore
 # ─────────────────────────────────────────────
 
-def backup_volumes(container_name: str, tag: str) -> list[str]:
+def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> list[str]:
     """
     Back up every named volume attached to a container.
+
+    stop_first=True  — stops the container before backup and restarts after.
+                       Guarantees a clean, consistent database snapshot.
+                       Used automatically for pre-update backups.
+    stop_first=False — backs up live. Convenient for scheduled/manual backups
+                       but SQLite WAL files may cause minor warnings.
+
     Returns list of backup file paths created.
     """
     try:
@@ -43,6 +50,13 @@ def backup_volumes(container_name: str, tag: str) -> list[str]:
     except docker.errors.NotFound:
         logger.warning(f"Container {container_name} not found for backup.")
         return []
+
+    was_running = container.status == "running"
+
+    if stop_first and was_running:
+        logger.info(f"Stopping {container_name} for clean backup...")
+        container.stop(timeout=30)
+        container.reload()
 
     backup_dir = Path(BACKUP_ROOT) / container_name
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -54,13 +68,12 @@ def backup_volumes(container_name: str, tag: str) -> list[str]:
         if mount.get("Type") != "volume":
             continue
         volume_name = mount["Name"]
-        mount_point = mount["Destination"]
         archive_name = f"{volume_name}_{tag}.tar.gz"
         archive_path = backup_dir / archive_name
 
         logger.info(f"Backing up volume {volume_name} -> {archive_path}")
 
-        # Spin up a temporary container to tar the volume (debian:bookworm-slim for GNU tar --ignore-failed-read support)
+        # debian:bookworm-slim for GNU tar (alpine BusyBox tar lacks --ignore-failed-read)
         try:
             client.containers.run(
                 "debian:bookworm-slim",
@@ -75,6 +88,10 @@ def backup_volumes(container_name: str, tag: str) -> list[str]:
             logger.info(f"Volume backup complete: {archive_path}")
         except Exception as e:
             logger.error(f"Failed to back up volume {volume_name}: {e}")
+
+    if stop_first and was_running:
+        logger.info(f"Restarting {container_name} after backup...")
+        container.start()
 
     return backed_up
 

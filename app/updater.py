@@ -70,7 +70,7 @@ def run_update(container_name: str, db: Session) -> dict:
 
     # ── 3. Backup volumes ─────────────────────────────────────────
     logger.info(f"[{container_name}] Starting pre-update backup (tag={tag})")
-    backed_up_files = backup_volumes(container_name, tag)
+    backed_up_files = backup_volumes(container_name, tag, stop_first=True)
 
     backup_record = BackupRecord(
         container_name=container_name,
