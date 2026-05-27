@@ -105,7 +105,21 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     backed_up = []
+
+    # Re-fetch attrs after potential stop to get current mount state
+    container.reload()
     mounts = container.attrs.get("Mounts", [])
+
+    named_volumes = [m for m in mounts if m.get("Type") == "volume"]
+    bind_mounts = [m for m in mounts if m.get("Type") == "bind"]
+    logger.info(
+        f"[{container_name}] Found {len(mounts)} mounts total: "
+        f"{len(named_volumes)} named volume(s), {len(bind_mounts)} bind mount(s)"
+    )
+    for m in named_volumes:
+        logger.info(f"[{container_name}]   volume: {m['Name']} -> {m['Destination']}")
+    for m in bind_mounts:
+        logger.debug(f"[{container_name}]   bind: {m.get('Source','?')} -> {m['Destination']} (skipped)")
 
     for mount in mounts:
         if mount.get("Type") != "volume":
