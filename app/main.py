@@ -127,6 +127,8 @@ def get_containers(db: Session = Depends(get_db)):
             "update_available": cfg.update_available if cfg else None,
             "version_checked_at": cfg.version_checked_at.isoformat() if cfg and cfg.version_checked_at else None,
             "version_source": cfg.github_endpoint if cfg else None,
+            "backup_retention": cfg.backup_retention if cfg else 3,
+            "excluded_volumes": cfg.excluded_volumes if cfg else None,
             "dockerhub_repo": cfg.dockerhub_repo if cfg else None,
             "github_suggestion": None,  # populated by check_version, not stored
         })
@@ -145,6 +147,8 @@ class ContainerConfigUpdate(BaseModel):
     notes: str | None = None
     github_repo: str | None = None
     github_endpoint: str | None = None
+    backup_retention: int | None = None
+    excluded_volumes: str | None = None
 
 
 @app.post("/api/containers/{name}/config")
@@ -173,6 +177,10 @@ def update_container_config(name: str, body: ContainerConfigUpdate, db: Session 
         cfg.update_available = None
     if body.github_endpoint is not None:
         cfg.github_endpoint = body.github_endpoint
+    if body.backup_retention is not None:
+        cfg.backup_retention = body.backup_retention
+    if body.excluded_volumes is not None:
+        cfg.excluded_volumes = body.excluded_volumes if body.excluded_volumes else None
 
     cfg.updated_at = datetime.utcnow()
     db.commit()

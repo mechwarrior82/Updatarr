@@ -831,6 +831,31 @@ async function renderDetail() {
     </div>
 
     <div class="detail-card">
+      <h3>Backup Settings</h3>
+      <div class="detail-row" style="align-items:center">
+        <span class="detail-label">Retention</span>
+        <span class="detail-value" style="display:flex;gap:4px;align-items:center">
+          <input id="retention-input" type="number" min="1" max="30"
+            value="${c.backup_retention || 3}"
+            style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:2px;width:50px">
+          <span style="color:var(--text-dim);font-size:10px">backups kept</span>
+          <button class="icon-btn" title="Save" onclick="saveBackupSettings('${c.name}')">✓</button>
+        </span>
+      </div>
+      <div class="detail-row" style="align-items:flex-start">
+        <span class="detail-label" style="padding-top:4px">Exclude volumes</span>
+        <span class="detail-value" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          <input id="exclusions-input" type="text"
+            value="${c.excluded_volumes || ''}"
+            placeholder="e.g. -cache,-logs"
+            style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:2px;width:160px"
+            onkeydown="if(event.key==='Enter') saveBackupSettings('${c.name}')">
+          <span style="color:var(--text-dim);font-size:9px">comma-separated substrings • cache/transcode excluded by default</span>
+        </span>
+      </div>
+    </div>
+
+    <div class="detail-card">
       <h3>Backups</h3>
       ${backupList}
     </div>
@@ -895,6 +920,25 @@ async function clearRepo(name) {
     }
   } catch(e) {
     toast('Failed to clear repo: ' + e.message, 'error');
+  }
+}
+
+async function saveBackupSettings(name) {
+  const retention = parseInt(document.getElementById('retention-input')?.value || '3');
+  const exclusions = document.getElementById('exclusions-input')?.value.trim() || '';
+  try {
+    await api('POST', `/api/containers/${name}/config`, {
+      backup_retention: retention,
+      excluded_volumes: exclusions || null,
+    });
+    const c = containers.find(c => c.name === name);
+    if (c) {
+      c.backup_retention = retention;
+      c.excluded_volumes = exclusions || null;
+    }
+    toast(`Backup settings saved for ${name}`);
+  } catch(e) {
+    toast('Failed to save backup settings: ' + e.message, 'error');
   }
 }
 

@@ -76,15 +76,47 @@ def pull_latest_image(image_name: str) -> docker.models.images.Image:
 # Volume backup / restore
 # ─────────────────────────────────────────────
 
-def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> list[str]:
+# Known cache/transient volume substrings that should never be backed up by default.
+# These are fully regeneratable and often very large.
+_DEFAULT_EXCLUDED_SUBSTRINGS = [
+    "-cache",
+    "_cache",
+    "-transcode",
+    "_transcode",
+    "-transcodes",
+]
+
+
+def _enforce_retention(backup_dir: Path, volume_name: str, keep: int):
+    """
+    Delete old backups for a specific volume, keeping only the most recent `keep` copies.
+    """
+    pattern = f"{volume_name}_*.tar.gz"
+    existing = sorted(backup_dir.glob(pattern), key=lambda f: f.stat().st_mtime, reverse=True)
+    to_delete = existing[keep:]
+    for f in to_delete:
+        try:
+            f.unlink()
+            logger.info(f"Retention: deleted old backup {f.name}")
+        except Exception as e:
+            logger.warning(f"Retention: could not delete {f.name}: {e}")
+
+
+def backup_volumes(
+    container_name: str,
+    tag: str,
+    stop_first: bool = False,
+    excluded_volumes: str = None,
+    retention: int = 3,
+) -> list[str]:
     """
     Back up every named volume attached to a container.
 
-    stop_first=True  — stops the container before backup and restarts after.
-                       Guarantees a clean, consistent database snapshot.
-                       Used automatically for pre-update backups.
-    stop_first=False — backs up live. Convenient for scheduled/manual backups
-                       but SQLite WAL files may cause minor warnings.
+    stop_first=True      — stops the container before backup and restarts after.
+                           Guarantees a clean, consistent database snapshot.
+    excluded_volumes     — comma-separated substrings; any volume whose name contains
+                           one of these strings is skipped. Defaults plus user-defined.
+    retention            — keep only the last N backups per volume, delete older ones.
 
     Returns list of backup file paths created.
     """
@@ -104,6 +136,14 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
     backup_dir = Path(BACKUP_ROOT) / container_name
     backup_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build exclusion list — defaults + user-defined
+    exclusions = list(_DEFAULT_EXCLUDED_SUBSTRINGS)
+    if excluded_volumes:
+        for e in excluded_volumes.split(","):
+            e = e.strip()
+            if e:
+                exclusions.append(e)
+
     backed_up = []
 
     # Re-fetch attrs after potential stop to get current mount state
@@ -121,19 +161,24 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
     for m in bind_mounts:
         logger.debug(f"[{container_name}]   bind: {m.get('Source','?')} -> {m['Destination']} (skipped)")
 
+    host_backup_dir = _resolve_host_path(backup_dir)
+    logger.debug(f"Host backup dir: {host_backup_dir}")
+
     for mount in mounts:
         if mount.get("Type") != "volume":
             continue
         volume_name = mount["Name"]
+
+        # Check exclusions
+        excluded_by = next((e for e in exclusions if e.lower() in volume_name.lower()), None)
+        if excluded_by:
+            logger.info(f"[{container_name}] Skipping volume {volume_name} (excluded by rule: {excluded_by!r})")
+            continue
+
         archive_name = f"{volume_name}_{tag}.tar.gz"
         archive_path = backup_dir / archive_name
 
         logger.info(f"Backing up volume {volume_name} -> {archive_path}")
-
-        # Resolve the real host path — Docker mounts are resolved from the host,
-        # not from inside the Updatarr container.
-        host_backup_dir = _resolve_host_path(backup_dir)
-        logger.debug(f"Host backup dir: {host_backup_dir}")
 
         # debian:bookworm-slim for GNU tar (alpine BusyBox tar lacks --ignore-failed-read)
         try:
@@ -148,6 +193,10 @@ def backup_volumes(container_name: str, tag: str, stop_first: bool = False) -> l
             )
             backed_up.append(str(archive_path))
             logger.info(f"Volume backup complete: {archive_path}")
+
+            # Enforce retention — delete old backups beyond the limit
+            _enforce_retention(backup_dir, volume_name, keep=retention)
+
         except Exception as e:
             logger.error(f"Failed to back up volume {volume_name}: {e}")
 

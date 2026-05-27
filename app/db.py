@@ -20,6 +20,10 @@ class ContainerConfig(Base):
     health_timeout = Column(Integer, default=90)
     notes = Column(Text, nullable=True)
 
+    # Backup settings
+    backup_retention = Column(Integer, default=3)        # keep last N backups per volume
+    excluded_volumes = Column(Text, nullable=True)       # comma-separated volume name substrings to skip
+
     # Version tracking
     github_repo = Column(String, nullable=True)       # user-set GitHub repo e.g. "linuxserver/docker-sonarr"
     dockerhub_repo = Column(String, nullable=True)    # auto-detected Docker Hub slug e.g. "linuxserver/sonarr"

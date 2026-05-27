@@ -72,7 +72,12 @@ def run_update(container_name: str, db: Session) -> dict:
 
     # ── 3. Backup volumes (stop container for clean snapshot) ─────
     logger.info(f"[{container_name}] Starting pre-update backup (tag={tag})")
-    backed_up_files = backup_volumes(container_name, tag, stop_first=True)
+    backed_up_files = backup_volumes(
+        container_name, tag,
+        stop_first=True,
+        excluded_volumes=cfg.excluded_volumes,
+        retention=cfg.backup_retention or 3,
+    )
 
     backup_record = BackupRecord(
         container_name=container_name,
@@ -169,7 +174,13 @@ def run_all_updates(db: Session) -> list[dict]:
 
 def run_manual_backup(container_name: str, db: Session) -> dict:
     tag = _tag_now()
-    files = backup_volumes(container_name, tag, stop_first=False)
+    cfg = db.query(ContainerConfig).filter_by(name=container_name).first()
+    files = backup_volumes(
+        container_name, tag,
+        stop_first=False,
+        excluded_volumes=cfg.excluded_volumes if cfg else None,
+        retention=cfg.backup_retention if cfg else 3,
+    )
     if not files:
         return {"status": "warning", "detail": "No named volumes found or backup failed"}
 
