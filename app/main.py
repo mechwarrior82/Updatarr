@@ -21,7 +21,14 @@ from updater import (
     release_hold,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+# Keep third-party loggers quieter
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("docker").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 UPDATE_SCHEDULE = os.environ.get("UPDATE_SCHEDULE", "0 4 * * *")  # 4AM daily cron
