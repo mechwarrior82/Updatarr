@@ -25,10 +25,10 @@ def run_update(container_name: str, db: Session) -> dict:
     """
     Full update flow for a single container:
       1. Check for hold
-      2. Backup volumes
-      3. Pull new image
-      4. Recreate container
-      5. Verify health
+      2. Backup volumes (stop container first for clean snapshot)
+      3. Pull new image and recreate
+      4. Verify health
+      5. Record current version
       6. On failure: restore backup, rollback image, set hold
     """
     # ── 1. Check hold ────────────────────────────────────────────
@@ -68,8 +68,9 @@ def run_update(container_name: str, db: Session) -> dict:
     old_image_id = get_current_image_id(container_name)
     event.old_image_id = old_image_id
     db.commit()
+    logger.info(f"[{container_name}] Current image ID: {old_image_id[:12] if old_image_id else 'unknown'}")
 
-    # ── 3. Backup volumes ─────────────────────────────────────────
+    # ── 3. Backup volumes (stop container for clean snapshot) ─────
     logger.info(f"[{container_name}] Starting pre-update backup (tag={tag})")
     backed_up_files = backup_volumes(container_name, tag, stop_first=True)
 
@@ -92,20 +93,33 @@ def run_update(container_name: str, db: Session) -> dict:
     event.new_image_id = new_image_id
     db.commit()
 
-    if old_image_id == new_image_id:
+    if old_image_id and old_image_id == new_image_id:
+        logger.info(f"[{container_name}] Already up to date — image unchanged")
+        record_current_version(container_name, db)
         event.status = "success"
         event.detail = "Already up to date"
         event.finished_at = datetime.utcnow()
         db.commit()
         return {"status": "success", "detail": "Already up to date"}
 
+    logger.info(
+        f"[{container_name}] Image updated: "
+        f"{old_image_id[:12] if old_image_id else 'unknown'} -> "
+        f"{new_image_id[:12] if new_image_id else 'unknown'}"
+    )
+
     # ── 5. Health check ───────────────────────────────────────────
     timeout = cfg.health_timeout or 90
+    logger.info(f"[{container_name}] Waiting for health check (timeout={timeout}s)")
     healthy = wait_for_health(container_name, timeout=timeout)
 
     if healthy:
+        logger.info(f"[{container_name}] Health check passed — recording version")
         record_current_version(container_name, db)
-        return _success(f"Updated successfully. New image: {new_image_id[:12] if new_image_id else 'unknown'}")
+        return _success(
+            f"Updated successfully. "
+            f"New image: {new_image_id[:12] if new_image_id else 'unknown'}"
+        )
 
     # ── 6. Rollback ───────────────────────────────────────────────
     logger.error(f"[{container_name}] Health check failed — initiating rollback")
@@ -113,10 +127,12 @@ def run_update(container_name: str, db: Session) -> dict:
     restore_ok = True
     if backed_up_files:
         restore_ok = restore_volumes(container_name, tag)
+        logger.info(f"[{container_name}] Volume restore: {'OK' if restore_ok else 'FAILED'}")
 
     rollback_ok = False
     if old_image_id:
         rollback_ok = recreate_with_image_id(container_name, old_image_id)
+        logger.info(f"[{container_name}] Image rollback: {'OK' if rollback_ok else 'FAILED'}")
 
     hold_reason = (
         f"Auto-rolled back after failed update on {tag}. "
@@ -140,7 +156,7 @@ def run_all_updates(db: Session) -> list[dict]:
     monitored = db.query(ContainerConfig).filter_by(monitored=True, held=False).all()
     results = []
 
-    # Always do gluetun last — it takes the whole VPN stack with it
+    # Always do gluetun last — it takes the whole VPN stack offline when updated
     ordered = sorted(monitored, key=lambda c: 1 if c.name == "gluetun" else 0)
 
     for cfg in ordered:
@@ -153,7 +169,7 @@ def run_all_updates(db: Session) -> list[dict]:
 
 def run_manual_backup(container_name: str, db: Session) -> dict:
     tag = _tag_now()
-    files = backup_volumes(container_name, tag)
+    files = backup_volumes(container_name, tag, stop_first=False)
     if not files:
         return {"status": "warning", "detail": "No named volumes found or backup failed"}
 
