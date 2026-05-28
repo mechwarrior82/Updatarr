@@ -519,8 +519,29 @@ def wait_for_health(container_name: str, timeout: int = 90) -> bool:
     Wait for a container to report healthy or running (if no healthcheck defined).
     Returns True on success, False on timeout or unhealthy.
     """
+    # Auto-extend timeout to cover the container's configured StartPeriod.
+    # Images like itzg/minecraft-bedrock-server download data on first start and
+    # set a long StartPeriod (e.g. 3 min). Our timeout must be at least that long
+    # or we'll always abort before the healthcheck even begins.
+    try:
+        c = client.containers.get(container_name)
+        hc_cfg = (c.attrs.get("Config", {}).get("Healthcheck") or {})
+        start_period_s = int((hc_cfg.get("StartPeriod") or 0) / 1_000_000_000)
+        if start_period_s > 0:
+            min_timeout = start_period_s + 60  # buffer beyond start period
+            if min_timeout > timeout:
+                logger.info(
+                    f"{container_name} healthcheck StartPeriod={start_period_s}s — "
+                    f"extending timeout from {timeout}s to {min_timeout}s"
+                )
+                timeout = min_timeout
+    except Exception:
+        pass
+
     deadline = time.time() + timeout
     logger.info(f"Waiting up to {timeout}s for {container_name} to become healthy...")
+
+    last_health_status = None
 
     while time.time() < deadline:
         try:
@@ -539,12 +560,16 @@ def wait_for_health(container_name: str, timeout: int = 90) -> bool:
                 return True
 
             health_status = health.get("Status")
+            if health_status != last_health_status:
+                logger.info(f"{container_name} health status: {health_status}")
+                last_health_status = health_status
+
             if health_status == "healthy":
-                logger.info(f"{container_name} is healthy")
                 return True
             elif health_status == "unhealthy":
                 logger.error(f"{container_name} reported unhealthy")
                 return False
+            # "starting" — within start_period, keep waiting
 
         except docker.errors.NotFound:
             logger.error(f"{container_name} not found during health check")
