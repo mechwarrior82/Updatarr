@@ -311,21 +311,26 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
     HostConfig so named volumes, bind mounts, ports, and network mode are all
     preserved exactly.
     """
+    # Lifecycle ops (create, network connect, start) can take well over 10 s,
+    # so use a dedicated client with a longer timeout than the global one used
+    # for container listing.
+    lc = docker.from_env(timeout=120)
+
     try:
-        attrs = client.api.inspect_container(container_name)
+        attrs = lc.api.inspect_container(container_name)
         config = attrs["Config"]
         hc_raw = attrs["HostConfig"]
         net_settings = attrs.get("NetworkSettings", {})
 
         # Stop if running (may already be stopped by backup step)
         try:
-            c = client.containers.get(container_name)
+            c = lc.containers.get(container_name)
             if c.status == "running":
                 c.stop(timeout=30)
         except docker.errors.NotFound:
             pass
 
-        client.api.remove_container(container_name, force=True)
+        lc.api.remove_container(container_name, force=True)
         logger.info(f"Removed old container {container_name}")
 
         # Containers sharing another container's or the host's network namespace
@@ -344,7 +349,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             for u in (hc_raw.get("Ulimits") or [])
         ] or None
 
-        hc = client.api.create_host_config(
+        hc = lc.api.create_host_config(
             binds=hc_raw.get("Binds") or [],
             port_bindings={} if uses_shared_netns else (hc_raw.get("PortBindings") or {}),
             restart_policy=hc_raw.get("RestartPolicy") or {},
@@ -373,7 +378,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             cpuset_cpus=hc_raw.get("CpusetCpus") or "",
         )
 
-        cid = client.api.create_container(
+        cid = lc.api.create_container(
             image=image,
             name=container_name,
             command=config.get("Cmd"),
@@ -395,13 +400,13 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
                 if net_name in (net_mode, "bridge"):
                     continue
                 try:
-                    net = client.networks.get(net_name)
+                    net = lc.networks.get(net_name)
                     net.connect(cid["Id"], aliases=net_cfg.get("Aliases") or [])
                     logger.info(f"Connected {container_name} to network {net_name}")
                 except Exception as e:
                     logger.warning(f"Could not connect {container_name} to network {net_name}: {e}")
 
-        client.api.start(cid)
+        lc.api.start(cid)
         logger.info(f"Recreated {container_name} with image {image[:40]}")
         return True
 
