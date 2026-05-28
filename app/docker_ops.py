@@ -328,6 +328,12 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
         client.api.remove_container(container_name, force=True)
         logger.info(f"Removed old container {container_name}")
 
+        # Containers sharing another container's or the host's network namespace
+        # cannot have their own hostname or port bindings — those belong to the
+        # namespace owner (e.g. gluetun for service:gluetun dependents).
+        net_mode = hc_raw.get("NetworkMode", "bridge")
+        uses_shared_netns = net_mode.startswith(("host", "container:", "service:"))
+
         log_cfg_raw = hc_raw.get("LogConfig")
         log_cfg = (
             LogConfig(type=log_cfg_raw["Type"], config=log_cfg_raw.get("Config") or {})
@@ -340,9 +346,9 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
 
         hc = client.api.create_host_config(
             binds=hc_raw.get("Binds") or [],
-            port_bindings=hc_raw.get("PortBindings") or {},
+            port_bindings={} if uses_shared_netns else (hc_raw.get("PortBindings") or {}),
             restart_policy=hc_raw.get("RestartPolicy") or {},
-            network_mode=hc_raw.get("NetworkMode", "bridge"),
+            network_mode=net_mode,
             volumes_from=hc_raw.get("VolumesFrom") or [],
             cap_add=hc_raw.get("CapAdd"),
             cap_drop=hc_raw.get("CapDrop"),
@@ -367,20 +373,15 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             cpuset_cpus=hc_raw.get("CpusetCpus") or "",
         )
 
-        # hostname conflicts with host/container/service network modes
-        net_mode = hc_raw.get("NetworkMode", "bridge")
-        uses_shared_netns = net_mode.startswith(("host", "container:", "service:"))
-        hostname = "" if uses_shared_netns else (config.get("Hostname") or "")
-
         cid = client.api.create_container(
             image=image,
             name=container_name,
             command=config.get("Cmd"),
-            hostname=hostname,
+            hostname="" if uses_shared_netns else (config.get("Hostname") or ""),
             user=config.get("User") or "",
             environment=config.get("Env") or [],
             volumes=list((config.get("Volumes") or {}).keys()),
-            ports=list((config.get("ExposedPorts") or {}).keys()),
+            ports=[] if uses_shared_netns else list((config.get("ExposedPorts") or {}).keys()),
             labels=config.get("Labels") or {},
             working_dir=config.get("WorkingDir") or "",
             entrypoint=config.get("Entrypoint"),
@@ -388,10 +389,8 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
         )
 
         # Reconnect to additional networks beyond the primary NetworkMode.
-        # Skip this for service/container/host/none modes — networking is
-        # inherited from another container or the host in those cases.
-        net_mode = hc_raw.get("NetworkMode", "bridge")
-        if not net_mode.startswith(("service:", "container:", "host", "none")):
+        # Skip for shared-netns modes — networking is inherited from the owner.
+        if not uses_shared_netns and net_mode not in ("host", "none"):
             for net_name, net_cfg in net_settings.get("Networks", {}).items():
                 if net_name in (net_mode, "bridge"):
                     continue
