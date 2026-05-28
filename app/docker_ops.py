@@ -426,6 +426,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             ipc_mode=hc_raw.get("IpcMode") or "",
             dns=hc_raw.get("Dns") or [],
             dns_search=hc_raw.get("DnsSearch") or [],
+            dns_opt=hc_raw.get("DnsOptions") or [],
             extra_hosts=hc_raw.get("ExtraHosts") or [],
             group_add=hc_raw.get("GroupAdd") or [],
             read_only=hc_raw.get("ReadonlyRootfs", False),
@@ -439,6 +440,14 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             memswap_limit=hc_raw.get("MemorySwap") or 0,
             cpu_shares=hc_raw.get("CpuShares") or 0,
             cpuset_cpus=hc_raw.get("CpusetCpus") or "",
+            nano_cpus=hc_raw.get("NanoCpus") or 0,
+            cpu_period=hc_raw.get("CpuPeriod") or 0,
+            cpu_quota=hc_raw.get("CpuQuota") or 0,
+            pids_limit=hc_raw.get("PidsLimit") or 0,
+            oom_kill_disable=hc_raw.get("OomKillDisable") or False,
+            oom_score_adj=hc_raw.get("OomScoreAdj") or 0,
+            runtime=hc_raw.get("Runtime") or None,
+            init=hc_raw.get("Init") or None,
         )
 
         # Preserve static IP / aliases on the primary network by building a
@@ -467,6 +476,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             name=container_name,
             command=config.get("Cmd"),
             hostname="" if uses_shared_netns else (config.get("Hostname") or ""),
+            domainname=config.get("Domainname") or "",
             user=config.get("User") or "",
             environment=config.get("Env") or [],
             volumes=list((config.get("Volumes") or {}).keys()),
@@ -474,6 +484,9 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             labels=config.get("Labels") or {},
             working_dir=config.get("WorkingDir") or "",
             entrypoint=config.get("Entrypoint"),
+            stop_signal=config.get("StopSignal") or None,
+            tty=config.get("Tty") or False,
+            stdin_open=config.get("OpenStdin") or False,
             host_config=hc,
             networking_config=networking_config,
         )
