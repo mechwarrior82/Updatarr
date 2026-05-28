@@ -441,6 +441,27 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             cpuset_cpus=hc_raw.get("CpusetCpus") or "",
         )
 
+        # Preserve static IP / aliases on the primary network by building a
+        # networking_config for create_container. Without this, Docker assigns a
+        # random IP even when the original container had a fixed ipv4_address.
+        networking_config = None
+        if not uses_shared_netns:
+            primary_net_info = net_settings.get("Networks", {}).get(net_mode)
+            if primary_net_info:
+                ipam = primary_net_info.get("IPAMConfig") or {}
+                ipv4 = ipam.get("IPv4Address") or None
+                ipv6 = ipam.get("IPv6Address") or None
+                aliases = primary_net_info.get("Aliases") or []
+                if ipv4 or ipv6 or aliases:
+                    ep_cfg = lc.api.create_endpoint_config(
+                        ipv4_address=ipv4,
+                        ipv6_address=ipv6,
+                        aliases=aliases,
+                    )
+                    networking_config = lc.api.create_networking_config({net_mode: ep_cfg})
+                    if ipv4:
+                        logger.info(f"Preserving static IP {ipv4} on network {net_mode}")
+
         cid = lc.api.create_container(
             image=image,
             name=container_name,
@@ -454,6 +475,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             working_dir=config.get("WorkingDir") or "",
             entrypoint=config.get("Entrypoint"),
             host_config=hc,
+            networking_config=networking_config,
         )
 
         # Reconnect to additional networks beyond the primary NetworkMode.
@@ -464,7 +486,13 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
                     continue
                 try:
                     net = lc.networks.get(net_name)
-                    net.connect(cid["Id"], aliases=net_cfg.get("Aliases") or [])
+                    ipam = (net_cfg.get("IPAMConfig") or {})
+                    net.connect(
+                        cid["Id"],
+                        aliases=net_cfg.get("Aliases") or [],
+                        ipv4_address=ipam.get("IPv4Address") or None,
+                        ipv6_address=ipam.get("IPv6Address") or None,
+                    )
                     logger.info(f"Connected {container_name} to network {net_name}")
                 except Exception as e:
                     logger.warning(f"Could not connect {container_name} to network {net_name}: {e}")
