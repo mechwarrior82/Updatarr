@@ -1,31 +1,36 @@
 services:
   updatarr:
     build: .
-    # Or use a pre-built image once you push it:
+    # Or use a pre-built image:
     # image: your-registry/updatarr:latest
     container_name: updatarr
     ports:
       - "3001:3001"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - updatarr-config:/app/config
-      - /mnt/nas/backups/docker:/backups
+      - /var/run/docker.sock:/var/run/docker.sock  # required — Docker API access
+      - updatarr-config:/app/config                # persistent database
+      - /your/backup/path:/backups                 # where volume backups are written
     environment:
-      - TZ=America/Chicago
+      - TZ=America/Chicago                         # your timezone
       - DB_PATH=/app/config/manager.db
       - BACKUP_ROOT=/backups
-      - UPDATE_SCHEDULE=0 4 * * *    # Cron: 4AM daily. Change as needed.
+      - UPDATE_SCHEDULE=0 4 * * *                  # cron: when to auto-update (4 AM daily)
     restart: unless-stopped
+
+    # Optional: attach to a custom network with a static IP.
+    # Remove this block if you just want the default bridge network.
     networks:
-      serverNetwork:
-        ipv4_address: 10.0.0.1
+      yourNetworkName:
+        ipv4_address: 10.0.0.x
+
     labels:
       - "traefik.enable=false"
 
 volumes:
   updatarr-config:
 
+# Only needed if you use the custom network block above.
 networks:
-  serverNetwork:
-    name: serverNetwork
+  yourNetworkName:
+    name: yourNetworkName
     external: true
