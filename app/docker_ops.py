@@ -367,11 +367,16 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
             cpuset_cpus=hc_raw.get("CpusetCpus") or "",
         )
 
+        # hostname conflicts with host/container/service network modes
+        net_mode = hc_raw.get("NetworkMode", "bridge")
+        uses_shared_netns = net_mode.startswith(("host", "container:", "service:"))
+        hostname = "" if uses_shared_netns else (config.get("Hostname") or "")
+
         cid = client.api.create_container(
             image=image,
             name=container_name,
             command=config.get("Cmd"),
-            hostname=config.get("Hostname") or "",
+            hostname=hostname,
             user=config.get("User") or "",
             environment=config.get("Env") or [],
             volumes=list((config.get("Volumes") or {}).keys()),
