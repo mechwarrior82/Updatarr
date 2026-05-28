@@ -493,6 +493,26 @@ def recreate_with_new_image(container_name: str, _: str) -> bool:
         logger.error(f"Could not inspect {container_name}: {e}")
         return False
 
+    # After a rollback Config.Image may be a bare SHA256 hash — try to resolve
+    # it back to a pullable tag via the local image store.
+    if image_ref.startswith("sha256:"):
+        try:
+            img = client.images.get(image_ref)
+            if img.tags:
+                resolved = img.tags[0]
+                logger.info(f"Resolved SHA256 to tag: {resolved}")
+                image_ref = resolved
+        except Exception as e:
+            logger.warning(f"Could not resolve SHA256 image ref for {container_name}: {e}")
+
+    if image_ref.startswith("sha256:"):
+        logger.error(
+            f"Cannot pull {container_name}: Config.Image is a bare SHA256 hash "
+            f"({image_ref[:19]}...) with no resolvable tag. "
+            f"Release the hold and update again after tagging the image manually."
+        )
+        return False
+
     logger.info(f"Pulling latest image: {image_ref}")
     result = subprocess.run(
         ["docker", "pull", image_ref],
@@ -506,7 +526,30 @@ def recreate_with_new_image(container_name: str, _: str) -> bool:
 
 
 def recreate_with_image_id(container_name: str, image_id: str) -> bool:
-    """Roll back a container to a specific image ID."""
+    """
+    Roll back a container to a specific image ID.
+
+    Re-tags the rollback image with the container's current image ref so the
+    recreated container gets Config.Image set to the pullable tag (not a bare
+    SHA256). Without this, the next update attempt would try to pull the hash
+    directly, which Docker Hub rejects.
+    """
+    try:
+        attrs = client.api.inspect_container(container_name)
+        original_ref = attrs["Config"]["Image"]
+        if not original_ref.startswith("sha256:"):
+            img = client.images.get(image_id)
+            # Split "repo/name:tag" into repo and tag parts
+            if ":" in original_ref.split("/")[-1]:
+                repo, tag = original_ref.rsplit(":", 1)
+            else:
+                repo, tag = original_ref, "latest"
+            img.tag(repo, tag)
+            logger.info(f"Re-tagged {image_id[:12]} as {original_ref} for rollback")
+            return _recreate_with_image(container_name, original_ref)
+    except Exception as e:
+        logger.warning(f"Could not re-tag rollback image for {container_name}: {e} — using bare image ID")
+
     return _recreate_with_image(container_name, image_id)
 
 
