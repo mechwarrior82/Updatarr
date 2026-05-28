@@ -5,6 +5,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from docker.types import LogConfig, Ulimit
 
 # Short timeout prevents a single unresponsive container from hanging
 # the entire /api/containers request for 60 seconds
@@ -282,12 +283,6 @@ def list_backups(container_name: str) -> list[dict]:
 # Container lifecycle
 # ─────────────────────────────────────────────
 
-def get_container_config(container_name: str) -> dict:
-    """Extract the config needed to recreate a container."""
-    c = client.containers.get(container_name)
-    return c.attrs
-
-
 def stop_container(container_name: str):
     try:
         c = client.containers.get(container_name)
@@ -306,54 +301,141 @@ def remove_container(container_name: str):
         pass
 
 
-def recreate_with_new_image(container_name: str, new_image: str) -> bool:
-    """
-    Stop, remove, and recreate a container with a new image.
-    NOTE: For compose-managed containers this sends a restart signal;
-    the compose file is the source of truth for full config.
-    We use `docker compose up -d --no-deps <service>` via subprocess for safety.
-    """
-    import subprocess
-    compose_file = os.environ.get("COMPOSE_FILE", "/compose/docker-compose.yml")
-    project = os.environ.get("COMPOSE_PROJECT", "arr")
 
+def _recreate_with_image(container_name: str, image: str) -> bool:
+    """
+    Stop, remove, and recreate a container with the given image, preserving
+    all configuration (volumes, ports, networks, env vars, labels, etc.).
+    Works for compose-managed and standalone containers alike — no compose
+    file access required. The new container inherits the old container's full
+    HostConfig so named volumes, bind mounts, ports, and network mode are all
+    preserved exactly.
+    """
     try:
-        result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project,
-             "up", "-d", "--no-deps", "--pull", "always", container_name],
-            capture_output=True, text=True, timeout=300
+        attrs = client.api.inspect_container(container_name)
+        config = attrs["Config"]
+        hc_raw = attrs["HostConfig"]
+        net_settings = attrs.get("NetworkSettings", {})
+
+        # Stop if running (may already be stopped by backup step)
+        try:
+            c = client.containers.get(container_name)
+            if c.status == "running":
+                c.stop(timeout=30)
+        except docker.errors.NotFound:
+            pass
+
+        client.api.remove_container(container_name, force=True)
+        logger.info(f"Removed old container {container_name}")
+
+        log_cfg_raw = hc_raw.get("LogConfig")
+        log_cfg = (
+            LogConfig(type=log_cfg_raw["Type"], config=log_cfg_raw.get("Config") or {})
+            if log_cfg_raw else None
         )
-        if result.returncode != 0:
-            logger.error(f"Compose up failed: {result.stderr}")
-            return False
-        logger.info(f"Recreated {container_name} with latest image")
+        ulimits = [
+            Ulimit(name=u["Name"], soft=u.get("Soft", 0), hard=u.get("Hard", 0))
+            for u in (hc_raw.get("Ulimits") or [])
+        ] or None
+
+        hc = client.api.create_host_config(
+            binds=hc_raw.get("Binds") or [],
+            port_bindings=hc_raw.get("PortBindings") or {},
+            restart_policy=hc_raw.get("RestartPolicy") or {},
+            network_mode=hc_raw.get("NetworkMode", "bridge"),
+            volumes_from=hc_raw.get("VolumesFrom") or [],
+            cap_add=hc_raw.get("CapAdd"),
+            cap_drop=hc_raw.get("CapDrop"),
+            devices=hc_raw.get("Devices") or [],
+            privileged=hc_raw.get("Privileged", False),
+            pid_mode=hc_raw.get("PidMode") or "",
+            ipc_mode=hc_raw.get("IpcMode") or "",
+            dns=hc_raw.get("Dns") or [],
+            dns_search=hc_raw.get("DnsSearch") or [],
+            extra_hosts=hc_raw.get("ExtraHosts") or [],
+            group_add=hc_raw.get("GroupAdd") or [],
+            read_only=hc_raw.get("ReadonlyRootfs", False),
+            security_opt=hc_raw.get("SecurityOpt") or [],
+            sysctls=hc_raw.get("Sysctls") or {},
+            log_config=log_cfg,
+            shm_size=hc_raw.get("ShmSize"),
+            tmpfs=hc_raw.get("Tmpfs") or {},
+            ulimits=ulimits,
+            mem_limit=hc_raw.get("Memory") or 0,
+            memswap_limit=hc_raw.get("MemorySwap") or 0,
+            cpu_shares=hc_raw.get("CpuShares") or 0,
+            cpuset_cpus=hc_raw.get("CpusetCpus") or "",
+        )
+
+        cid = client.api.create_container(
+            image=image,
+            name=container_name,
+            command=config.get("Cmd"),
+            hostname=config.get("Hostname") or "",
+            user=config.get("User") or "",
+            environment=config.get("Env") or [],
+            volumes=list((config.get("Volumes") or {}).keys()),
+            ports=list((config.get("ExposedPorts") or {}).keys()),
+            labels=config.get("Labels") or {},
+            working_dir=config.get("WorkingDir") or "",
+            entrypoint=config.get("Entrypoint"),
+            host_config=hc,
+        )
+
+        # Reconnect to additional networks beyond the primary NetworkMode.
+        # Skip this for service/container/host/none modes — networking is
+        # inherited from another container or the host in those cases.
+        net_mode = hc_raw.get("NetworkMode", "bridge")
+        if not net_mode.startswith(("service:", "container:", "host", "none")):
+            for net_name, net_cfg in net_settings.get("Networks", {}).items():
+                if net_name in (net_mode, "bridge"):
+                    continue
+                try:
+                    net = client.networks.get(net_name)
+                    net.connect(cid["Id"], aliases=net_cfg.get("Aliases") or [])
+                    logger.info(f"Connected {container_name} to network {net_name}")
+                except Exception as e:
+                    logger.warning(f"Could not connect {container_name} to network {net_name}: {e}")
+
+        client.api.start(cid)
+        logger.info(f"Recreated {container_name} with image {image[:40]}")
         return True
+
     except Exception as e:
         logger.error(f"Failed to recreate {container_name}: {e}")
         return False
 
 
-def recreate_with_image_id(container_name: str, image_id: str) -> bool:
-    """Roll back a container to a specific image ID."""
+def recreate_with_new_image(container_name: str, _: str) -> bool:
+    """
+    Pull the latest version of the container's current image and recreate it.
+    Works for any container — compose-managed or standalone — without needing
+    access to the compose file on disk.
+    """
     import subprocess
-    compose_file = os.environ.get("COMPOSE_FILE", "/compose/docker-compose.yml")
-    project = os.environ.get("COMPOSE_PROJECT", "arr")
 
     try:
-        # Tag the old image so compose can reference it
-        old_image = client.images.get(image_id)
-        old_image.tag(f"{container_name}-rollback", "latest")
-
-        result = subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project,
-             "up", "-d", "--no-deps", container_name],
-            capture_output=True, text=True, timeout=300,
-            env={**os.environ, "COMPOSE_FORCE_NEW_IMAGE": image_id}
-        )
-        return result.returncode == 0
+        attrs = client.api.inspect_container(container_name)
+        image_ref = attrs["Config"]["Image"]
     except Exception as e:
-        logger.error(f"Rollback failed for {container_name}: {e}")
+        logger.error(f"Could not inspect {container_name}: {e}")
         return False
+
+    logger.info(f"Pulling latest image: {image_ref}")
+    result = subprocess.run(
+        ["docker", "pull", image_ref],
+        capture_output=True, text=True, timeout=300
+    )
+    if result.returncode != 0:
+        logger.error(f"Pull failed for {image_ref}: {result.stderr.strip()}")
+        return False
+
+    return _recreate_with_image(container_name, image_ref)
+
+
+def recreate_with_image_id(container_name: str, image_id: str) -> bool:
+    """Roll back a container to a specific image ID."""
+    return _recreate_with_image(container_name, image_id)
 
 
 # ─────────────────────────────────────────────
@@ -430,7 +512,7 @@ def list_all_containers() -> list[dict]:
             state = attrs.get("State", {})
             health = state.get("Health")
             image_info = attrs.get("Config", {}).get("Image", "")
-            
+
             # Get image tags from the image object
             image_id = attrs.get("Image", "")
             image_tags = []
@@ -440,6 +522,11 @@ def list_all_containers() -> list[dict]:
             except Exception:
                 pass
 
+            # Read compose metadata from labels (set automatically by Docker Compose)
+            labels = attrs.get("Config", {}).get("Labels") or {}
+            compose_project = labels.get("com.docker.compose.project")
+            compose_service = labels.get("com.docker.compose.service")
+
             result.append({
                 "name": attrs["Name"].lstrip("/"),
                 "status": state.get("Status", "unknown"),
@@ -447,6 +534,8 @@ def list_all_containers() -> list[dict]:
                 "image_id": image_id,
                 "health": health.get("Status") if health else None,
                 "started": state.get("StartedAt"),
+                "compose_project": compose_project,
+                "compose_service": compose_service,
             })
         except Exception as e:
             # One bad container shouldn't break the whole list
@@ -459,6 +548,8 @@ def list_all_containers() -> list[dict]:
                 "image_id": raw.get("ImageID", ""),
                 "health": None,
                 "started": None,
+                "compose_project": None,
+                "compose_service": None,
             })
 
     return result

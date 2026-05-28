@@ -10,14 +10,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - updatarr-config:/app/config
       - /mnt/nas/backups/docker:/backups
-      # Mount your arr stack compose file so the manager can call `docker compose up`
-      - /path/to/your/arr/docker-compose.yml:/compose/docker-compose.yml:ro
     environment:
       - TZ=America/Chicago
       - DB_PATH=/app/config/manager.db
       - BACKUP_ROOT=/backups
-      - COMPOSE_FILE=/compose/docker-compose.yml
-      - COMPOSE_PROJECT=arr          # Must match your compose project name
       - UPDATE_SCHEDULE=0 4 * * *    # Cron: 4AM daily. Change as needed.
     restart: unless-stopped
     networks:

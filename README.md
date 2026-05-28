@@ -1,6 +1,6 @@
 # Updatarr
 
-A self-hosted container lifecycle manager built for your *arr stack.
+A self-hosted container lifecycle manager for Docker. Works with any container configuration — compose stacks, multiple stacks, or standalone containers.
 
 ## Features
 
@@ -11,24 +11,21 @@ A self-hosted container lifecycle manager built for your *arr stack.
 - Manual backup and restore from the UI.
 - Scheduled auto-updates (cron syntax via env var).
 - Audit log of every update event.
+- Compose stack detection — containers are automatically labelled with their stack name.
 
 ---
 
 ## Setup
 
-### 1. Update the compose file
+### 1. Configure the compose file
 
-Edit `docker-compose.yml` and set:
+Copy `docker-compose.yml.example` to `docker-compose.yml` and edit it:
 
-```yaml
-- /path/to/your/arr/docker-compose.yml:/compose/docker-compose.yml:ro
-- COMPOSE_PROJECT=arr   # Match your actual compose project name
-```
-
-To find your compose project name:
 ```bash
-docker compose ls
+cp docker-compose.yml.example docker-compose.yml
 ```
+
+Set your backup path and timezone. No compose file mounting is needed — Updatarr reads container metadata directly from Docker.
 
 ### 2. Build and start
 
@@ -42,8 +39,6 @@ docker compose up -d --build
 http://<your-server-ip>:3001
 ```
 
-Or via Cloudflare tunnel at `updatarr.yourdomain.com`.
-
 ### 4. Enable monitoring
 
 Check the checkbox next to each container you want managed. Unchecked containers are never auto-updated or backed up.
@@ -52,13 +47,11 @@ Check the checkbox next to each container you want managed. Unchecked containers
 
 ## Environment Variables
 
-| Variable          | Default                        | Description                                 |
-|-------------------|--------------------------------|---------------------------------------------|
-| `DB_PATH`         | `/app/config/manager.db`       | SQLite database path                        |
-| `BACKUP_ROOT`     | `/backups`                     | Root directory for volume backups           |
-| `COMPOSE_FILE`    | `/compose/docker-compose.yml`  | Path to your arr stack compose file         |
-| `COMPOSE_PROJECT` | `arr`                          | Docker Compose project name                 |
-| `UPDATE_SCHEDULE` | `0 4 * * *`                    | Cron schedule for auto-updates              |
+| Variable          | Default                  | Description                                 |
+|-------------------|--------------------------|---------------------------------------------|
+| `DB_PATH`         | `/app/config/manager.db` | SQLite database path                        |
+| `BACKUP_ROOT`     | `/backups`               | Root directory for volume backups           |
+| `UPDATE_SCHEDULE` | `0 4 * * *`              | Cron schedule for auto-updates              |
 
 ---
 
@@ -67,14 +60,22 @@ Check the checkbox next to each container you want managed. Unchecked containers
 ```
 1. Pre-flight: skip if container is held or not monitored
 2. Backup all named volumes → /backups/<container_name>/<volume>_<tag>.tar.gz
-3. docker compose up -d --no-deps --pull always <container>
-4. Wait for healthcheck to pass (configurable per container, default 90s)
+3. docker pull <image>
+4. Stop, remove, and recreate the container with the new image
+   (full config — volumes, ports, networks, env vars — is preserved from the running container)
+5. Wait for healthcheck to pass (configurable per container, default 90s)
    └─ SUCCESS → log it, done
    └─ FAILURE → restore volume backup
               → recreate with previous image ID
               → set HELD = true with reason
               → log rolled_back event
 ```
+
+## How It Works With Your Stacks
+
+Updatarr talks to Docker via the socket and reads container metadata directly. No compose files need to be mounted. When a container is updated, the existing running config (bind mounts, named volumes, port bindings, networks, environment variables, labels, etc.) is captured from Docker inspect and preserved in the recreated container.
+
+Docker Compose labels (`com.docker.compose.project`, `com.docker.compose.service`) are read automatically to group containers by stack in the UI. Standalone containers (not managed by compose) are shown with a "standalone" badge.
 
 ## Gluetun Safety
 
@@ -84,11 +85,7 @@ updating it last minimises disruption.
 
 ---
 
-## Adding to Your Arr Compose
-
-Add the service block from this project's `docker-compose.yml` into your main
-arr `docker-compose.yml`, or run it as a separate stack — either works since
-it connects to the external `serverNetwork`.
+## Cloudflare Tunnel
 
 Add to your Cloudflare tunnel dashboard if you want external access:
 

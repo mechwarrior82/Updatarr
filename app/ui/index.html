@@ -264,6 +264,8 @@
   .badge.held       { background: rgba(245,166,35,0.12); color: var(--warn); border: 1px solid rgba(245,166,35,0.25); }
   .badge.starting   { background: rgba(245,166,35,0.08); color: var(--warn); border: 1px solid rgba(245,166,35,0.2); }
   .badge.paused     { background: rgba(122,144,138,0.12); color: var(--text-dim); border: 1px solid var(--border); }
+  .badge.stack      { background: rgba(0,184,122,0.07); color: var(--accent2); border: 1px solid rgba(0,184,122,0.2); font-size: 9px; letter-spacing: 1px; }
+  .badge.standalone { background: rgba(122,144,138,0.07); color: var(--muted); border: 1px solid var(--border); font-size: 9px; letter-spacing: 1px; }
 
   .dot {
     width: 5px; height: 5px;
@@ -679,6 +681,11 @@ function renderContainers() {
           ${c.name}
           ${heldBadge}
         </div>
+        <div style="margin-top:3px">
+          ${c.compose_project
+            ? `<span class="badge stack">${c.compose_project}</span>`
+            : `<span class="badge standalone">standalone</span>`}
+        </div>
       </td>
       <td>${statusBadge}</td>
       <td>${healthBadge}</td>
@@ -739,6 +746,14 @@ async function renderDetail() {
     <div class="detail-card">
       <h3>${c.name}</h3>
       ${holdSection}
+      <div class="detail-row">
+        <span class="detail-label">Stack</span>
+        <span class="detail-value">
+          ${c.compose_project
+            ? `<span class="badge stack">${c.compose_project}</span>`
+            : `<span class="badge standalone">standalone</span>`}
+        </span>
+      </div>
       <div class="detail-row">
         <span class="detail-label">Status</span>
         <span class="detail-value">${badge(c.status)}</span>
