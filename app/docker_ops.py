@@ -87,6 +87,13 @@ _DEFAULT_EXCLUDED_SUBSTRINGS = [
     "-transcodes",
 ]
 
+# Bind mount source path prefixes that are too large or system-level to back up.
+# Users can add more exclusions per-container via the excluded_volumes setting.
+_DEFAULT_EXCLUDED_BIND_PREFIXES = [
+    "/proc", "/sys", "/dev", "/run",
+    "/mnt", "/media",
+]
+
 
 def _enforce_retention(backup_dir: Path, volume_name: str, keep: int):
     """
@@ -160,46 +167,77 @@ def backup_volumes(
     for m in named_volumes:
         logger.info(f"[{container_name}]   volume: {m['Name']} -> {m['Destination']}")
     for m in bind_mounts:
-        logger.debug(f"[{container_name}]   bind: {m.get('Source','?')} -> {m['Destination']} (skipped)")
+        logger.debug(f"[{container_name}]   bind: {m.get('Source','?')} -> {m['Destination']}")
 
     host_backup_dir = _resolve_host_path(backup_dir)
     logger.debug(f"Host backup dir: {host_backup_dir}")
 
     for mount in mounts:
-        if mount.get("Type") != "volume":
-            continue
-        volume_name = mount["Name"]
+        mtype = mount.get("Type")
 
-        # Check exclusions
-        excluded_by = next((e for e in exclusions if e.lower() in volume_name.lower()), None)
-        if excluded_by:
-            logger.info(f"[{container_name}] Skipping volume {volume_name} (excluded by rule: {excluded_by!r})")
-            continue
+        if mtype == "volume":
+            volume_name = mount["Name"]
+            excluded_by = next((e for e in exclusions if e.lower() in volume_name.lower()), None)
+            if excluded_by:
+                logger.info(f"[{container_name}] Skipping volume {volume_name} (excluded: {excluded_by!r})")
+                continue
 
-        archive_name = f"{volume_name}_{tag}.tar.gz"
-        archive_path = backup_dir / archive_name
+            archive_name = f"{volume_name}_{tag}.tar.gz"
+            archive_path = backup_dir / archive_name
+            logger.info(f"Backing up volume {volume_name} -> {archive_path}")
 
-        logger.info(f"Backing up volume {volume_name} -> {archive_path}")
+            try:
+                client.containers.run(
+                    "debian:bookworm-slim",
+                    command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
+                    volumes={
+                        volume_name: {"bind": "/source", "mode": "ro"},
+                        host_backup_dir: {"bind": "/backup", "mode": "rw"},
+                    },
+                    remove=True,
+                )
+                backed_up.append(str(archive_path))
+                logger.info(f"Volume backup complete: {archive_path}")
+                _enforce_retention(backup_dir, volume_name, keep=retention)
+            except Exception as e:
+                logger.error(f"Failed to back up volume {volume_name}: {e}")
 
-        # debian:bookworm-slim for GNU tar (alpine BusyBox tar lacks --ignore-failed-read)
-        try:
-            client.containers.run(
-                "debian:bookworm-slim",
-                command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
-                volumes={
-                    volume_name: {"bind": "/source", "mode": "ro"},
-                    host_backup_dir: {"bind": "/backup", "mode": "rw"},
-                },
-                remove=True,
-            )
-            backed_up.append(str(archive_path))
-            logger.info(f"Volume backup complete: {archive_path}")
+        elif mtype == "bind":
+            source = mount.get("Source", "")
+            destination = mount.get("Destination", "")
 
-            # Enforce retention — delete old backups beyond the limit
-            _enforce_retention(backup_dir, volume_name, keep=retention)
+            # Skip large storage mounts and system paths
+            if any(source.startswith(p) for p in _DEFAULT_EXCLUDED_BIND_PREFIXES):
+                logger.debug(f"[{container_name}] Skipping bind {source} (excluded source prefix)")
+                continue
 
-        except Exception as e:
-            logger.error(f"Failed to back up volume {volume_name}: {e}")
+            # Apply user exclusion rules against the destination path
+            excluded_by = next((e for e in exclusions if e.lower() in destination.lower()), None)
+            if excluded_by:
+                logger.info(f"[{container_name}] Skipping bind {destination} (excluded: {excluded_by!r})")
+                continue
+
+            # Sanitise destination path into a stable archive name prefix
+            safe_name = destination.strip("/").replace("/", "_") or "root"
+            archive_name = f"{safe_name}_{tag}.tar.gz"
+            archive_path = backup_dir / archive_name
+            logger.info(f"Backing up bind mount {source} ({destination}) -> {archive_path}")
+
+            try:
+                client.containers.run(
+                    "debian:bookworm-slim",
+                    command=f"tar czf /backup/{archive_name} --ignore-failed-read -C /source .",
+                    volumes={
+                        source: {"bind": "/source", "mode": "ro"},
+                        host_backup_dir: {"bind": "/backup", "mode": "rw"},
+                    },
+                    remove=True,
+                )
+                backed_up.append(str(archive_path))
+                logger.info(f"Bind mount backup complete: {archive_path}")
+                _enforce_retention(backup_dir, safe_name, keep=retention)
+            except Exception as e:
+                logger.error(f"Failed to back up bind mount {source}: {e}")
 
     if stop_first and was_running:
         logger.info(f"Restarting {container_name} after backup...")
@@ -283,6 +321,31 @@ def list_backups(container_name: str) -> list[dict]:
 # Container lifecycle
 # ─────────────────────────────────────────────
 
+def _build_binds(hc_raw: dict) -> list[str]:
+    """
+    Build a complete Binds list for container recreation.
+
+    Docker Compose V2 stores named-volume bindings in HostConfig.Mounts rather
+    than HostConfig.Binds. If we only read Binds we lose the named-volume
+    references and Docker creates a fresh anonymous volume at each recreate.
+    This helper merges both sources so named volumes are always preserved.
+    """
+    binds = list(hc_raw.get("Binds") or [])
+    bound_dests = {b.split(":")[1] for b in binds if b.count(":") >= 1}
+
+    for m in hc_raw.get("Mounts") or []:
+        target = m.get("Target", "")
+        mtype = m.get("Type", "bind")
+        source = m.get("Source", "")
+        if not target or target in bound_dests or not source or mtype not in ("volume", "bind"):
+            continue
+        mode = "ro" if m.get("ReadOnly", False) else "rw"
+        binds.append(f"{source}:{target}:{mode}")
+        bound_dests.add(target)
+
+    return binds
+
+
 def stop_container(container_name: str):
     try:
         c = client.containers.get(container_name)
@@ -350,7 +413,7 @@ def _recreate_with_image(container_name: str, image: str) -> bool:
         ] or None
 
         hc = lc.api.create_host_config(
-            binds=hc_raw.get("Binds") or [],
+            binds=_build_binds(hc_raw),
             port_bindings={} if uses_shared_netns else (hc_raw.get("PortBindings") or {}),
             restart_policy=hc_raw.get("RestartPolicy") or {},
             network_mode=net_mode,
